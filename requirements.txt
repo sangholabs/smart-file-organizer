@@ -1,0 +1,33 @@
+# 핵심 기능은 표준 라이브러리만으로 동작합니다. 아래는 선택 사항입니다.
+# 설치: py -m pip install -r requirements.txt   (또는 새 PC에서 설치.bat 더블클릭)
+# 무엇이 동작 가능한지 확인: py main.py doctor
+# (없는 라이브러리의 기능은 자동으로 건너뜁니다 — 설치는 필요한 것만 해도 됩니다)
+
+# 휴지통으로 보내기 기능 (config.json 의 use_recycle_bin=true 일 때 사용)
+send2trash>=1.8
+
+# 이미지 시각중복(리사이즈·재압축·메타데이터만 다른 사진) 탐지
+Pillow>=10.0
+
+# PDF 텍스트 내용중복 탐지 (docx/xlsx/pptx/odt/hwpx/zip 은 추가설치 없이 동작)
+pypdf>=4.0
+
+# HEIC/HEIF(아이폰 사진) 시각중복 탐지
+pillow-heif>=0.13
+
+# 구형 한글 .hwp 내용중복 탐지 (.hwpx 는 추가설치 없이 동작)
+olefile>=0.46
+
+# 7z 압축 내용중복 탐지 (zip 계열은 추가설치 없이 동작)
+py7zr>=0.20
+
+# 영상 perceptual 중복(재인코딩·해상도 다른 같은 영상) — ffmpeg 정적 바이너리 포함
+imageio-ffmpeg>=0.5
+
+# OCR(글자 없는 스캔 PDF·이미지) — 오프라인 한+영
+rapidocr-onnxruntime>=1.3
+PyMuPDF>=1.24          # 스캔 PDF 페이지 렌더(OCR용)
+
+# RAW 사진(.dng/.cr2 등) 시각중복
+rawpy>=0.19
+numpy>=1.24

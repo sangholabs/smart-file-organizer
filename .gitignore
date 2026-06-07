@@ -1,0 +1,26 @@
+# 생성물 / 런타임 데이터 (소스만 추적)
+data/
+dist/
+build/
+*.spec
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# PC별 설정(첫 실행 시 자동 생성)
+config.json
+
+# 배포 산출물 (용량 큼: exe 150MB+ → GitHub 100MB 제한 초과)
+배포_파일정리/
+배포_파일정리.zip
+배포_소스.zip
+*.exe
+
+# 에디터/도구 내부
+.claude/
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
