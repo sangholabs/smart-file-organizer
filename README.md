@@ -52,10 +52,22 @@ exe 를 더블클릭해 바로 쓸 수 있고, 첫 실행 시 SmartScreen 경고
 3. **`파일정리_실행.vbs` 더블클릭** 으로 GUI 실행.
    - winget 이 없는 구형 Windows 면 `설치.bat` 이 python.org 설치 안내를 띄웁니다("Add python.exe to PATH" 체크 후 재실행).
 
-**방법 B — exe (설치 불필요, Smart App Control 꺼진 PC):**
+**방법 B — exe (설치 불필요, Smart App Control 꺼진 PC만):**
 - `배포_파일정리.zip` 안의 `파일정리.exe` 더블클릭. Python·라이브러리 설치 필요 없음.
+- ⚠️ SAC 가 **켜진** PC에서는 exe 가 차단됩니다. **GitHub Releases 에 올려도 마찬가지** — 방법 A를 쓰세요.
 
 > 어느 방법이든 `config.json` 의 검사 폴더가 새 PC에 없으면 **자동으로 그 PC 기준으로 재설정**됩니다. 무엇이 동작 가능한지는 `py main.py doctor` 또는 GUI 요약 탭의 "환경 점검" 으로 확인하세요.
+
+### ⚠️ "Smart App Control 이 위험한 파일 확장자를 가진 앱을 차단했습니다" 가 뜰 때
+
+exe 가 아니라, **인터넷에서 받은 zip 안의 `.bat`/`.vbs` 에 붙은 "인터넷에서 받음" 표식(Mark‑of‑the‑Web)** 때문입니다. 표식만 지우면 SAC 를 켜둔 채로 바로 실행됩니다.
+
+- **가장 쉬움 — 압축 풀기 전 차단 해제:** 받은 zip 우클릭 → **속성** → 맨 아래 **"차단 해제(Unblock)"** 체크 → 확인 → 그 다음 압축 해제 → `설치.bat` → `파일정리_실행.vbs`.
+- **이미 풀었다면 — PowerShell(차단 안 됨):** `Get-ChildItem -Recurse 'C:\풀어둔\폴더' | Unblock-File` 실행 후 다시 더블클릭.
+- **표식 제거 없이 — 터미널에서 직접:** `cmd`/PowerShell 과 `python.exe` 는 서명되어 SAC 를 통과합니다. `py -m pip install -r requirements.txt` → `py app.py`.
+- **git 으로 받으면 표식이 안 붙습니다:** `git clone` (private 레포는 인증 필요) 한 폴더는 Mark‑of‑the‑Web 가 없어 차단 해제 단계 자체가 불필요합니다.
+
+> 왜 Releases 로는 안 되나? SAC 는 "어디서 받았는지"가 아니라 **서명·평판**으로 판단하며, 인터넷 다운로드 파일엔 표식이 붙어 **오히려 더** 차단됩니다. 무료로 해결하려면 위 "소스 + 차단 해제" 가 정답입니다. (exe 를 정식으로 통과시키려면 유료 코드서명 인증서 + 평판 축적이 필요.)
 
 ---
 
