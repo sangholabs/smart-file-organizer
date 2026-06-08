@@ -438,6 +438,51 @@ class TestExport(Base):
             exporter.export({}, self.tmp / "x.txt", fmt="txt")
 
 
+class TestAudioCluster(unittest.TestCase):
+    def test_tag_separation_and_format(self):
+        from organizer import fingerprint as fp
+        # 합성 cp 지문(uint32 배열 → hex). 같은 시퀀스 2개 + 다른 시퀀스 1개
+        import numpy as np
+        a = np.arange(100, dtype="<u4")
+        a2 = a.copy(); a2[0] ^= 1                      # 1비트만 다름 → 거의 동일
+        b = (np.arange(100, dtype="<u4") * 7 + 13)     # 완전 다른 시퀀스
+        ha, ha2, hb = a.tobytes().hex(), a2.tobytes().hex(), b.tobytes().hex()
+        by_aud = {
+            f"cp:{ha}": [{"path": "x1", "size": 1, "mtime": 0, "full_hash": "h1"}],
+            f"cp:{ha2}": [{"path": "x2", "size": 1, "mtime": 0, "full_hash": "h2"}],
+            f"cp:{hb}": [{"path": "y", "size": 1, "mtime": 0, "full_hash": "h3"}],
+        }
+        clusters = fp._cluster_audio(by_aud, {"audio_ber": 0.10})
+        sizes = sorted(len(c) for c in clusters if len(c) > 1)
+        self.assertEqual(sizes, [2])  # x1,x2 만 묶이고 y 는 별개
+
+    def test_different_tags_never_mix(self):
+        from organizer import fingerprint as fp
+        by_aud = {
+            "cp:" + ("00" * 40): [{"path": "a", "size": 1, "mtime": 0, "full_hash": "ha"}],
+            "lc:" + ("0" * 64): [{"path": "b", "size": 1, "mtime": 0, "full_hash": "hb"}],
+        }
+        clusters = fp._cluster_audio(by_aud, {})
+        # 태그가 다르면 절대 한 그룹이 되지 않음
+        for c in clusters:
+            self.assertLess(len(c), 2)
+
+
+@unittest.skipUnless(_HAVE_FFMPEG, "imageio-ffmpeg 미설치")
+class TestVideoPreview(Base):
+    def test_video_frame_image(self):
+        import subprocess
+        import imageio_ffmpeg
+        from organizer import fingerprint as fp
+        ff = imageio_ffmpeg.get_ffmpeg_exe()
+        v = self.src / "clip.mp4"
+        subprocess.run([ff, "-y", "-f", "lavfi", "-i",
+                        "testsrc=duration=2:size=320x240:rate=24", str(v)],
+                       capture_output=True)
+        png = fp.video_frame_image(str(v))
+        self.assertTrue(png and png[:8] == b"\x89PNG\r\n\x1a\n")
+
+
 class TestDoctor(unittest.TestCase):
     def test_check_shape(self):
         from organizer import doctor

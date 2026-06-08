@@ -109,11 +109,15 @@ def default_config() -> dict:
         "ocr_max_pages": 10,          # PDF OCR 최대 페이지
         "ocr_min_px": 200,            # 긴 변이 이보다 작으면 OCR 생략(아이콘/썸네일)
         "ocr_max_px": 2000,           # 긴 변이 이보다 크면 축소 후 OCR
-        # 오디오 perceptual 중복(재인코딩 음악). 실험적·정확도 낮음 → 기본 OFF.
-        # 캘리브레이션: 동일군(해밍 0~23)과 무관군(20~36) 분포가 겹침 → 자체지문 신뢰도 낮음.
-        # 보수적으로 10 유지(엄격→오탐 최소). 켜도 정확도 한계 있음(튜닝_결과.md 참고).
+        # 오디오 perceptual 중복(재인코딩 음악). 하이브리드 지문:
+        #  - fpcalc(chromaprint) 있으면 cp 지문(시퀀스) → BER(audio_ber)로 비교
+        #  - 없으면 로컬 chroma 지문(lc, 256비트) → audio_threshold_lc(해밍)
+        # 기본 OFF(검토용). 임계값은 캘리브레이션(튜닝_결과.md)으로 정함.
         "audio_match": False,
-        "audio_threshold": 10,        # 오디오 지문(63비트) 해밍거리 허용치
+        # 캘리브레이션: 동일 재인코딩 BER ≤0.07, 무관 ≥0.125 → 0.10이 안전지대(오탐<미탐)
+        "audio_ber": 0.10,            # chromaprint 비트오류율 허용치(0~1, 작을수록 엄격)
+        "audio_threshold_lc": 40,     # 로컬 chroma(256비트) 해밍거리 허용치
+        "audio_threshold": 10,        # (레거시 63비트 지문용 — 하위호환)
         # 무거운 작업(영상/오디오/RAW/OCR) 동시 실행 수(0=자동: cpu//4, 최소 2)
         "media_workers": 0,
         # 이미지 해시: "dhash"(기본·빠름) 또는 "phash"(DCT, 단조이미지 정밀도↑)

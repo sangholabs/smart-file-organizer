@@ -16,6 +16,14 @@ def _has(module: str) -> bool:
         return False
 
 
+def _fpcalc_ok() -> bool:
+    try:
+        from . import fingerprint
+        return fingerprint._fpcalc_exe() is not None
+    except Exception:
+        return False
+
+
 def _ffmpeg_ok() -> bool:
     if not _has("imageio_ffmpeg"):
         return False
@@ -62,6 +70,10 @@ _CHECKS = [
      _ffmpeg_ok,
      "재인코딩/해상도만 다른 같은 영상 탐지",
      "pip install imageio-ffmpeg"),
+    ("audio_cp", "오디오 정밀(chromaprint)",
+     lambda: _fpcalc_ok(),
+     "음악 재인코딩본을 정확히 매칭(없으면 로컬 chroma로 대체)",
+     "winget install -e --id AcoustID.Chromaprint"),
     ("ocr", "OCR(스캔본 글자 인식)",
      lambda: _has("rapidocr_onnxruntime") and _has("fitz"),
      "글자 없는 스캔 PDF/이미지에서 글자 추출",

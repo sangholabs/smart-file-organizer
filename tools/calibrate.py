@@ -83,13 +83,29 @@ def calibrate_audio(tmp: Path):
     _run([ff, "-y", "-f", "lavfi", "-i", "anoisesrc=d=20:c=pink", "-ac", "2", str(tmp / "a_other2.wav")])
     other_files = [tmp / "a_other1.wav", tmp / "a_other2.wav"]
 
-    sig_same = {p.name: fp.audio_fingerprint(str(p)) for p in same_files}
-    sig_other = {p.name: fp.audio_fingerprint(str(p)) for p in other_files}
-    sig_same = {k: v for k, v in sig_same.items() if v}
-    sig_other = {k: v for k, v in sig_other.items() if v}
-    intra = [fp._hamming(int(a, 16), int(b, 16)) for a, b in combinations(sig_same.values(), 2)]
-    inter = [fp._hamming(int(a, 16), int(b, 16)) for a in sig_same.values() for b in sig_other.values()]
-    return intra, inter
+    sig_same = [fp.audio_fingerprint(str(p)) for p in same_files]
+    sig_other = [fp.audio_fingerprint(str(p)) for p in other_files]
+    sig_same = [s for s in sig_same if s]
+    sig_other = [s for s in sig_other if s]
+    if not sig_same:
+        return None, None, None
+    tag = sig_same[0].split(":", 1)[0]
+
+    def dist(a, b):
+        ta, ha = a.split(":", 1)
+        tb, hb = b.split(":", 1)
+        if ta != tb:
+            return None
+        if ta == "cp":
+            import numpy as np
+            aa = np.frombuffer(bytes.fromhex(ha), dtype="<u4")
+            bb = np.frombuffer(bytes.fromhex(hb), dtype="<u4")
+            return float(round(fp._cp_ber(aa, bb), 3))
+        return int(fp._hamming(int(ha, 16), int(hb, 16)))
+
+    intra = [d for a, b in combinations(sig_same, 2) if (d := dist(a, b)) is not None]
+    inter = [d for a in sig_same for b in sig_other if (d := dist(a, b)) is not None]
+    return tag, intra, inter
 
 
 def calibrate_neardoc():
@@ -128,15 +144,21 @@ def main():
         lines.append(f"## 영상 측정 실패: {e}\n"); vrec = None
 
     try:
-        ai, ae = calibrate_audio(tmp)
-        lines.append("## 오디오 (63비트 해밍)")
+        atag, ai, ae = calibrate_audio(tmp)
+        unit = "BER 0~1" if atag == "cp" else "256비트 해밍"
+        key = "audio_ber" if atag == "cp" else "audio_threshold_lc"
+        lines.append(f"## 오디오 [{atag}] ({unit})")
         lines.append(f"- 동일군 intra: {sorted(ai)} (max={max(ai) if ai else '-'})")
         lines.append(f"- 상이군 inter: min={min(ae) if ae else '-'}, all={sorted(ae)}")
-        arec = (max(ai) + min(ae)) // 2 if ai and ae else 10
-        sep = (min(ae) - max(ai)) if (ai and ae) else -1
-        lines.append(f"- 권장 audio_threshold ~= **{arec}** (분리margin={sep}; 작으면 기본 OFF 유지)\n")
+        if ai and ae:
+            mid = (max(ai) + min(ae)) / 2
+            arec = round(mid, 2) if atag == "cp" else int(mid)
+            sep = round(min(ae) - max(ai), 3)
+            lines.append(f"- 권장 {key} ~= **{arec}** (분리margin={sep})\n")
+        else:
+            lines.append(f"- 측정 부족 → 기본값 유지\n")
     except Exception as e:
-        lines.append(f"## 오디오 측정 실패: {e}\n"); arec = None
+        lines.append(f"## 오디오 측정 실패: {e}\n")
 
     nd = calibrate_neardoc()
     lines.append("## 근접문서 (MinHash 유사도 0~1)")

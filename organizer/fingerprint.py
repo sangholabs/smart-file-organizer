@@ -258,6 +258,27 @@ def _video_frame_dhash(ffmpeg: str, path: str, ts: float) -> str | None:
         return None
 
 
+def video_frame_image(path: str, ts: float | None = None, px: int = 320) -> bytes | None:
+    """미리보기용 키프레임 PNG 바이트(긴 변 px 이하). 실패 시 None.
+
+    GUI 미리보기 패널이 영상 재인코딩본을 나란히 비교할 때 사용한다.
+    """
+    ffmpeg = _ffmpeg_exe()
+    if not ffmpeg:
+        return None
+    if ts is None:
+        dur = _video_duration(ffmpeg, path)
+        ts = dur * 0.5 if dur > 0 else 1.0
+    try:
+        p = subprocess.run(
+            [ffmpeg, "-ss", f"{ts:.3f}", "-i", long_path(path), "-frames:v", "1",
+             "-vf", f"scale='min({px},iw)':-2", "-f", "image2pipe", "-vcodec", "png", "-"],
+            capture_output=True)
+        return p.stdout or None
+    except Exception:
+        return None
+
+
 def video_fingerprint(path: str) -> str | None:
     """키프레임 5장 dHash 연결(80hex). 재인코딩·해상도 달라도 유사."""
     ffmpeg = _ffmpeg_exe()
@@ -277,12 +298,75 @@ def video_fingerprint(path: str) -> str | None:
     return "".join(parts)
 
 
-# ---------------- 오디오 perceptual (ffmpeg + numpy, best-effort) ----------------
-def audio_fingerprint(path: str) -> str | None:
-    """앞 30초를 mono 8kHz 로 디코드 → 거친 스펙트로그램 dHash 비트열(hex).
+# ---------------- 오디오 perceptual (하이브리드: chromaprint > 로컬 chroma) ----------------
+# 지문 형식: "<tag>:<hex>"  (tag: cp=chromaprint, lc=로컬 chroma) — 태그가 같을 때만 비교.
+_FPCALC = None
+_FPCALC_TRIED = False
+_AUDIO_BITS = 256   # 고정폭 서명(비트) → _hamming 비교
 
-    재인코딩·비트레이트가 달라도 스펙트럼 윤곽이 비슷하면 매칭(베스트에포트).
+
+def _fpcalc_exe():
+    """fpcalc(chromaprint) 실행파일 경로. 없으면 None.
+
+    ① PyInstaller 번들  ② PATH  ③ winget(WinGet Links / Packages) 설치 경로
     """
+    global _FPCALC, _FPCALC_TRIED
+    if _FPCALC_TRIED:
+        return _FPCALC
+    _FPCALC_TRIED = True
+    import shutil
+    import sys
+    cands = []
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        cands.append(os.path.join(base, "fpcalc.exe"))
+    cands.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fpcalc.exe"))
+    found = shutil.which("fpcalc")
+    if found:
+        cands.append(found)
+    local = os.environ.get("LOCALAPPDATA", "")
+    if local:
+        cands.append(os.path.join(local, "Microsoft", "WinGet", "Links", "fpcalc.exe"))
+    for c in cands:
+        try:
+            if c and os.path.isfile(c):
+                _FPCALC = c
+                return _FPCALC
+        except OSError:
+            continue
+    return None
+
+
+def _chromaprint_raw(path: str) -> str | None:
+    """fpcalc -raw → uint32 배열을 바이트 hex 로 직렬화(시퀀스 보존). 실패 시 None.
+
+    chromaprint 의 정확도는 '서브지문 시퀀스'에 있으므로 접지 않고 그대로 저장하고,
+    비교는 BER(비트오류율)로 한다(_cluster_cp).
+    """
+    exe = _fpcalc_exe()
+    if not exe:
+        return None
+    try:
+        import numpy as np
+    except Exception:
+        return None
+    try:
+        p = subprocess.run([exe, "-raw", "-length", "120", long_path(path)],
+                           capture_output=True, text=True, errors="ignore", timeout=60)
+        vals = None
+        for line in p.stdout.splitlines():
+            if line.startswith("FINGERPRINT="):
+                vals = [int(x) for x in line[12:].split(",") if x.strip()]
+                break
+        if not vals or len(vals) < 8:
+            return None
+        return np.asarray(vals, dtype="<u4").tobytes().hex()
+    except Exception:
+        return None
+
+
+def _local_chroma_fp(path: str) -> int | None:
+    """ffmpeg PCM(mono 22050Hz) → 12 pitch-class chroma × 시간세그먼트 → 256비트."""
     ffmpeg = _ffmpeg_exe()
     if not ffmpeg:
         return None
@@ -291,29 +375,72 @@ def audio_fingerprint(path: str) -> str | None:
     except Exception:
         return None
     try:
+        sr = 22050
         p = subprocess.run(
-            [ffmpeg, "-i", long_path(path), "-t", "60", "-ac", "1", "-ar", "8000",
+            [ffmpeg, "-i", long_path(path), "-t", "120", "-ac", "1", "-ar", str(sr),
              "-f", "s16le", "-"], capture_output=True)
-        if len(p.stdout) < 8000 * 2:   # 1초 미만이면 신뢰도 낮음
+        if len(p.stdout) < sr * 2:   # 1초 미만
             return None
         x = np.frombuffer(p.stdout, dtype=np.int16).astype(np.float32)
-        # 시간축을 합친 '전체 평균 로그 스펙트럼' → 재인코딩(인코더 지연)에 강건
-        win = 2048
-        n = (len(x) // win) * win
-        if n < win:
+        win = 4096
+        hop = 2048
+        nfr = 1 + (len(x) - win) // hop
+        if nfr < 8:
             return None
-        frames = x[:n].reshape(-1, win) * np.hanning(win)
-        mag = np.abs(np.fft.rfft(frames, axis=1)).mean(axis=0)   # 평균 스펙트럼
-        nb = 64
-        edges = np.linspace(1, len(mag), nb + 1).astype(int)     # DC 제외
-        bands = np.array([np.log1p(mag[edges[b]:max(edges[b] + 1, edges[b + 1])].mean())
-                          for b in range(nb)])
-        bits = 0                                                  # 인접 밴드 비교 → 63비트
-        for b in range(nb - 1):
-            bits = (bits << 1) | (1 if bands[b] > bands[b + 1] else 0)
-        return f"{bits:016x}"
+        idx = np.arange(win)
+        window = np.hanning(win).astype(np.float32)
+        freqs = np.fft.rfftfreq(win, 1.0 / sr)
+        freqs[0] = 1.0
+        # 주파수 → pitch class(0..11): 12*log2(f/440)+69 → %12
+        midi = np.round(12 * np.log2(freqs / 440.0) + 69).astype(int)
+        pc = np.mod(midi, 12)
+        valid = (freqs > 50) & (freqs < 5000)
+        chroma_frames = []
+        for i in range(nfr):
+            seg = x[i * hop:i * hop + win]
+            if seg.size < win:
+                break
+            mag = np.abs(np.fft.rfft(seg * window))
+            ch = np.zeros(12, dtype=np.float64)
+            for k in range(12):
+                sel = valid & (pc == k)
+                if sel.any():
+                    ch[k] = mag[sel].sum()
+            s = ch.sum()
+            if s > 0:
+                ch /= s
+            chroma_frames.append(ch)
+        if not chroma_frames:
+            return None
+        C = np.array(chroma_frames)                       # (frames, 12)
+        nseg = min(_AUDIO_BITS // 12, len(C))             # 시간 세그먼트 수
+        nseg = max(1, nseg)
+        segs = np.array_split(C, nseg)
+        bits = []
+        for s in segs:
+            m = s.mean(axis=0)
+            med = np.median(m)
+            for k in range(12):
+                bits.append(1 if m[k] > med else 0)
+        # 256비트로 패딩/절단
+        bits = (bits + [0] * _AUDIO_BITS)[:_AUDIO_BITS]
+        out = 0
+        for b in bits:
+            out = (out << 1) | b
+        return out
     except Exception:
         return None
+
+
+def audio_fingerprint(path: str) -> str | None:
+    """하이브리드 오디오 지문 "<tag>:<hex>". fpcalc 있으면 cp(시퀀스), 없으면 로컬 chroma(lc)."""
+    raw = _chromaprint_raw(path)
+    if raw is not None:
+        return f"cp:{raw}"
+    v = _local_chroma_fp(path)
+    if v is not None:
+        return f"lc:{v:0{_AUDIO_BITS // 4}x}"
+    return None
 
 
 # ---------------- OCR (rapidocr + PyMuPDF) ----------------
@@ -846,6 +973,88 @@ def _bk_cluster(items, threshold):
     return list(groups.values())
 
 
+def _cp_ber(a, b) -> float:
+    """두 chromaprint 시퀀스(uint32 배열)의 최소 BER(비트오류율 0~1). 작을수록 동일."""
+    import numpy as np
+    n = min(len(a), len(b))
+    if n < 8:
+        return 1.0
+    best = 1.0
+    for off in (0, 1, 2, -1, -2):   # 작은 정렬 오프셋 탐색(재인코딩 지연 보정)
+        if off >= 0:
+            x, y = a[off:off + n], b[:n]
+        else:
+            x, y = a[:n], b[-off:-off + n]
+        m = min(len(x), len(y))
+        if m < 8:
+            continue
+        xor = np.bitwise_xor(x[:m], y[:m])
+        # 32비트 popcount
+        bits = np.unpackbits(xor.view(np.uint8)).sum()
+        ber = bits / (m * 32.0)
+        if ber < best:
+            best = ber
+    return best
+
+
+def _cluster_cp(by_hex: dict, ber_thr: float):
+    """chromaprint 버킷을 BER 임계값으로 union-find 클러스터링."""
+    import numpy as np
+    keys = list(by_hex.keys())
+    arrs = []
+    for h in keys:
+        try:
+            arrs.append(np.frombuffer(bytes.fromhex(h), dtype="<u4"))
+        except (ValueError, TypeError):
+            arrs.append(np.empty(0, dtype="<u4"))
+    parent = list(range(len(keys)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(keys)):
+        if arrs[i].size < 8:
+            continue
+        for j in range(i + 1, len(keys)):
+            if arrs[j].size < 8:
+                continue
+            if _cp_ber(arrs[i], arrs[j]) <= ber_thr:
+                parent[find(i)] = find(j)
+    groups = {}
+    for idx, h in enumerate(keys):
+        groups.setdefault(find(idx), []).extend(by_hex[h])
+    return [recs for recs in groups.values() if len(recs) > 1]
+
+
+def _cluster_audio(by_aud: dict, cfg: dict | None):
+    """오디오 지문을 태그(cp/lc/legacy)별로 분리해 각자 방식으로 클러스터링.
+
+    태그가 다른 지문은 서로 비교하지 않는다(혼합/레거시 카탈로그에서 오탐 방지).
+    - cp(chromaprint): 시퀀스 BER 비교
+    - lc/legacy: 256/63비트 해밍 비교
+    """
+    cfg = cfg or {}
+    buckets = {}   # tag -> {hex: recs}
+    for h, recs in by_aud.items():
+        if isinstance(h, str) and ":" in h:
+            tag, hexpart = h.split(":", 1)
+        else:
+            tag, hexpart = "legacy", h
+        buckets.setdefault(tag, {})[hexpart] = recs
+    clusters = []
+    if "cp" in buckets:
+        ber = float(cfg.get("audio_ber", 0.20))
+        clusters.extend(_cluster_cp(buckets["cp"], ber))
+    if "lc" in buckets:
+        clusters.extend(_cluster_hex(buckets["lc"], int(cfg.get("audio_threshold_lc", 40))))
+    if "legacy" in buckets:
+        clusters.extend(_cluster_hex(buckets["legacy"], int(cfg.get("audio_threshold", 10))))
+    return clusters
+
+
 def _cluster_hex(by_hex: dict, threshold: int):
     """{hexhash: [recs]} → 해밍거리 임계값으로 BK-tree 클러스터링."""
     items = []
@@ -978,9 +1187,8 @@ def similarity_groups(db_path, cfg: dict | None = None) -> dict:
     vthr = int(cfg.get("video_threshold", 40)) if cfg else 40
     video_dups = _build_groups(_cluster_hex(by_vid, vthr), "vid")
 
-    # 오디오: 스펙트럼 지문 해밍거리로 클러스터(베스트에포트)
-    athr = int(cfg.get("audio_threshold", 48)) if cfg else 48
-    audio_dups = _build_groups(_cluster_hex(by_aud, athr), "aud")
+    # 오디오: 하이브리드 지문(cp/lc) 태그별 해밍거리로 클러스터
+    audio_dups = _build_groups(_cluster_audio(by_aud, cfg), "aud")
 
     # 근접 문서(약간 수정된 문서)
     doc_near = []

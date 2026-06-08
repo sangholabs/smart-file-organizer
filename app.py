@@ -1271,7 +1271,8 @@ class App(tk.Tk):
             if not p:
                 continue
             ext = os.path.splitext(p)[1].lower()
-            if ext in fingerprint.IMAGE_EXTS or ext in fingerprint.RAW_EXTS:
+            if (ext in fingerprint.IMAGE_EXTS or ext in fingerprint.RAW_EXTS
+                    or ext in fingerprint.VIDEO_EXTS):
                 role = "보관" if not m.get("checkable", True) else (
                     "정리대상" if m.get("checked") else "검토")
                 items.append({"path": p, "size": m.get("size", 0),
@@ -1281,7 +1282,7 @@ class App(tk.Tk):
         self._clear_strip()
         if not items:
             ttk.Label(self.preview_strip,
-                      text="이 그룹에는 미리볼 이미지가 없습니다(문서/영상/압축).",
+                      text="이 그룹에는 미리볼 이미지/영상이 없습니다(문서/압축 등).",
                       style="Hint.TLabel").pack(anchor="w")
             return
         ttk.Label(self.preview_strip, text="불러오는 중…",
@@ -1311,6 +1312,12 @@ class App(tk.Tk):
                 import io
                 im = Image.open(io.BytesIO(thumb.data)) if getattr(thumb, "format", None) \
                     else Image.fromarray(thumb.data)
+            elif ext in fingerprint.VIDEO_EXTS:
+                import io
+                png = fingerprint.video_frame_image(path, px=max(px * 2, 320))
+                if not png:
+                    return None
+                im = Image.open(io.BytesIO(png))
             else:
                 im = Image.open(path)
             im = im.convert("RGB")

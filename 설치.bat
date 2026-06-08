@@ -77,6 +77,17 @@ if errorlevel 1 (
 )
 echo.
 
+REM ---- 3b) optional: chromaprint (fpcalc) for precise audio matching ----
+echo [3b/4] Optional: Chromaprint (precise audio fingerprint)...
+where winget >nul 2>&1
+if errorlevel 1 (
+  echo   winget not found - skipping. Audio still works via local fingerprint.
+) else (
+  winget install -e --id AcoustID.Chromaprint --accept-package-agreements --accept-source-agreements
+  echo   (If it failed, that's OK - audio falls back to local fingerprint.)
+)
+echo.
+
 REM ---- 4) environment check --------------------------------
 echo [4/4] Environment check:
 %PYCMD% main.py doctor
