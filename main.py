@@ -19,7 +19,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from organizer import analyzer, applier, config, doctor, reporter, scanner
+from organizer import analyzer, applier, config, doctor, exporter, reporter, scanner
 
 
 def cmd_scan(args):
@@ -84,6 +84,24 @@ def cmd_doctor(args):
     return 0
 
 
+def cmd_export(args):
+    cfg = config.load_config()
+    if not config.CATALOG_DB.exists():
+        print("색인이 없습니다. 먼저 'py main.py scan' 을 실행하세요.")
+        return 1
+    print("분석 중...")
+    result = analyzer.analyze(cfg=cfg)
+    fmt = args.format
+    if args.out:
+        out = Path(args.out)
+    else:
+        out = config.DATA_DIR / f"결과.{fmt}"
+    exporter.export(result, out, fmt=fmt)
+    n = sum(1 for _ in exporter.iter_rows(result))
+    print(f"내보내기 완료: {out}  ({n:,}개 항목, {fmt})")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="파일/폴더 정리 도구 (로컬 전용)")
     sub = p.add_subparsers(dest="command", required=True)
@@ -106,6 +124,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     dp = sub.add_parser("doctor", help="환경 점검(선택 기능 가용성 확인)")
     dp.set_defaults(func=cmd_doctor)
+
+    ep = sub.add_parser("export", help="분석 결과를 CSV/JSON 으로 내보내기")
+    ep.add_argument("--format", choices=["csv", "json"], default="csv", help="출력 형식(기본 csv)")
+    ep.add_argument("--out", help="저장 경로 (기본: data/결과.<형식>)")
+    ep.set_defaults(func=cmd_export)
 
     return p
 

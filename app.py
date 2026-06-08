@@ -13,6 +13,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +25,14 @@ from tkinter import filedialog, messagebox, ttk
 BASE_DIR = Path(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, str(BASE_DIR))
 
-from organizer import analyzer, applier, config, scanner  # noqa: E402
+from organizer import analyzer, applier, config, exporter, fingerprint, scanner  # noqa: E402
+
+# 이미지 미리보기용(선택). 없으면 미리보기만 자동 비활성, 나머지 기능은 정상.
+try:
+    from PIL import Image, ImageTk  # noqa: F401
+    HAVE_IMAGETK = True
+except Exception:
+    HAVE_IMAGETK = False
 
 CHECK_ON = "☑"
 CHECK_OFF = "☐"
@@ -130,6 +138,12 @@ class App(tk.Tk):
         self.busy = False
         self.log_visible = False
         self._uid = 0
+        self._stage_t0 = {}          # stage -> 시작 시각(ETA 계산용)
+        self._prog_mode = None       # 현재 progressbar 모드
+        self.preview_q = queue.Queue()
+        self._thumb_cache = {}       # path -> (mtime, PIL.Image)
+        self._thumb_imgs = []        # PhotoImage 참조 유지(GC 방지)
+        self._preview_seq = 0        # 최신 미리보기 요청만 반영
         self.cancel_event = threading.Event()
         self.sort_state = {}         # (tree_key, col) -> bool(desc)
         self._scan_count = 0
@@ -204,6 +218,7 @@ class App(tk.Tk):
         self.btn_preview.pack(side="right", padx=4)
         ttk.Button(action, text="되돌리기", command=self.on_undo).pack(side="right", padx=4)
         ttk.Button(action, text="🗑 격리 비우기", command=self.on_purge).pack(side="right", padx=4)
+        ttk.Button(action, text="⬇ 결과 내보내기", command=self.on_export).pack(side="right", padx=4)
         self.btn_log = ttk.Button(action, text="진행 상황 ▾", command=self._toggle_log)
         self.btn_log.pack(side="right", padx=4)
 
@@ -340,6 +355,9 @@ class App(tk.Tk):
         for key, title in CATS:
             self._make_tab(key, title)
         self._make_insights_tab()
+
+        # 이미지 미리보기 패널(접이식, 아래쪽)
+        self._make_preview_pane(content)
 
         # 로그 (접이식)
         self.log_frame = ttk.LabelFrame(content, text="진행 로그", style="Card.TLabelframe")
@@ -668,6 +686,7 @@ class App(tk.Tk):
         self.log.configure(state="disabled")
 
     def _poll(self):
+        self._drain_preview()
         while not self.log_q.empty():
             self.log_write(self.log_q.get_nowait())
         # 진행 표시(마지막 값만 반영)
@@ -677,12 +696,18 @@ class App(tk.Tk):
         if last is not None:
             stage, done, total, msg = last
             short = os.path.basename((msg or "").rstrip("\\/")) or (msg or "")
-            if stage == "collect":
-                self.prog_lbl.configure(text=f"수집 {done:,}개 · {short}")
-            elif stage == "hash":
-                self.prog_lbl.configure(text=f"중복 해시 {done:,} · {short}")
-            elif stage == "fingerprint":
-                self.prog_lbl.configure(text=f"내용 지문 {done:,}/{total:,} · {short}")
+            label = {"collect": "수집", "hash": "중복 해시", "fingerprint": "내용 지문"}.get(stage, stage)
+            if total:  # 총량을 아는 단계 → 결정형 막대 + % + ETA
+                self._set_prog_mode("determinate")
+                pct = max(0, min(100, done * 100 // total))
+                self.progress.configure(value=pct)
+                eta = self._eta(stage, done, total)
+                self.prog_lbl.configure(
+                    text=f"{label} {done:,}/{total:,} ({pct}%){eta} · {short}")
+            else:      # 총량 모름(수집) → 무한 막대 + 카운트
+                self._set_prog_mode("indeterminate")
+                self._stage_t0.pop(stage, None)
+                self.prog_lbl.configure(text=f"{label} {done:,}개 · {short}")
         while not self.result_q.empty():
             kind, payload = self.result_q.get_nowait()
             if kind == "analysis":
@@ -704,6 +729,37 @@ class App(tk.Tk):
                 messagebox.showerror("오류", payload)
         self.after(80, self._poll)
 
+    def _eta(self, stage, done, total):
+        """경과/처리율 기반 남은 시간 문자열(' · 남은 ~m:ss'). 못 구하면 빈 문자열."""
+        now = time.time()
+        t0 = self._stage_t0.get(stage)
+        if t0 is None:
+            self._stage_t0[stage] = now
+            return ""
+        elapsed = now - t0
+        if done <= 0 or elapsed < 1.0:
+            return ""
+        remain = elapsed / done * (total - done)
+        if remain < 1:
+            return ""
+        m, s = divmod(int(remain), 60)
+        return f" · 남은 ~{m}:{s:02d}" if m else f" · 남은 ~{s}초"
+
+    def _set_prog_mode(self, mode):
+        """determinate/indeterminate 전환(중복 호출 안전)."""
+        if self._prog_mode == mode:
+            return
+        self._prog_mode = mode
+        try:
+            if mode == "indeterminate":
+                self.progress.configure(mode="indeterminate")
+                self.progress.start(12)
+            else:
+                self.progress.stop()
+                self.progress.configure(mode="determinate", value=0)
+        except tk.TclError:
+            pass
+
     def _set_busy(self, busy):
         self.busy = busy
         state = "disabled" if busy else "normal"
@@ -713,14 +769,16 @@ class App(tk.Tk):
         if busy:
             self.btn_scan.configure(text="■ 멈춤 (Esc)", state="normal")
             self.progress.pack(side="right", padx=(8, 0))
-            self.progress.configure(mode="indeterminate")
-            self.progress.start(12)
+            self._stage_t0.clear()
+            self._prog_mode = None
+            self._set_prog_mode("indeterminate")
         else:
             self.btn_scan.configure(text="🔍 스캔 및 분석 (F5)", state="normal")
             try:
                 self.progress.stop()
             except tk.TclError:
                 pass
+            self._prog_mode = None
             self.progress.pack_forget()
             self.prog_lbl.configure(text="")
 
@@ -742,6 +800,27 @@ class App(tk.Tk):
                 sys.stdout = old
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def on_export(self):
+        if not self.analysis:
+            messagebox.showinfo("결과 내보내기", "먼저 '스캔 및 분석'을 실행하세요.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="결과 내보내기",
+            defaultextension=".csv",
+            initialfile="정리결과.csv",
+            filetypes=[("CSV (Excel)", "*.csv"), ("JSON", "*.json")])
+        if not path:
+            return
+        try:
+            out = exporter.export(self.analysis, path)
+            n = sum(1 for _ in exporter.iter_rows(self.analysis))
+            if messagebox.askyesno(
+                    "내보내기 완료",
+                    f"{n:,}개 항목을 저장했습니다.\n{out}\n\n폴더를 열까요?"):
+                subprocess.Popen(["explorer", "/select,", str(out)])
+        except Exception as e:
+            messagebox.showerror("내보내기 오류", str(e))
 
     # ---------------- 격리 비우기 / 스캔 이력 ----------------
     def on_purge(self):
@@ -1138,6 +1217,146 @@ class App(tk.Tk):
         box = CHECK_ON if checked else CHECK_OFF
         tv.item(iid, text=box, tags=("checked",) if checked else (meta["zebra"],))
 
+    # ---------------- 이미지 미리보기 ----------------
+    def _make_preview_pane(self, parent):
+        self.preview_on = tk.BooleanVar(value=bool(self.cfg.get("ui_preview", True)))
+        wrap = ttk.Frame(parent)
+        wrap.pack(side="bottom", fill="x", pady=(4, 0))
+        bar = ttk.Frame(wrap)
+        bar.pack(fill="x")
+        cb = ttk.Checkbutton(bar, text="🖼 미리보기", variable=self.preview_on,
+                             command=self._toggle_preview)
+        cb.pack(side="left")
+        self.preview_hint = ttk.Label(
+            bar, text=("그룹/파일 줄을 클릭하면 사진을 나란히 비교합니다."
+                       if HAVE_IMAGETK else "미리보기에는 Pillow 가 필요합니다(설치.bat)."),
+            style="Hint.TLabel")
+        self.preview_hint.pack(side="left", padx=10)
+        # 썸네일이 놓일 가로 스트립
+        self.preview_strip = ttk.Frame(wrap, height=190)
+        if self.preview_on.get() and HAVE_IMAGETK:
+            self.preview_strip.pack(fill="x", pady=(4, 0))
+
+    def _toggle_preview(self):
+        self.cfg["ui_preview"] = self.preview_on.get()
+        self._save_cfg()
+        if self.preview_on.get() and HAVE_IMAGETK:
+            self.preview_strip.pack(fill="x", pady=(4, 0))
+        else:
+            self.preview_strip.pack_forget()
+
+    def _clear_strip(self):
+        for w in self.preview_strip.winfo_children():
+            w.destroy()
+        self._thumb_imgs = []
+
+    def _show_preview(self, tv, iid):
+        if not (HAVE_IMAGETK and self.preview_on.get()):
+            return
+        meta = self.item_meta.get(iid)
+        if not meta:
+            return
+        # 그룹이면 그 그룹, 파일이면 부모 그룹의 파일들을 모은다
+        if meta.get("type") == "group":
+            kids = meta.get("children", [])
+        elif meta.get("type") == "file":
+            gid = tv.parent(iid)
+            kids = self.item_meta.get(gid, {}).get("children", [iid])
+        else:
+            return
+        items = []
+        for c in kids:
+            m = self.item_meta.get(c, {})
+            p = m.get("path")
+            if not p:
+                continue
+            ext = os.path.splitext(p)[1].lower()
+            if ext in fingerprint.IMAGE_EXTS or ext in fingerprint.RAW_EXTS:
+                role = "보관" if not m.get("checkable", True) else (
+                    "정리대상" if m.get("checked") else "검토")
+                items.append({"path": p, "size": m.get("size", 0),
+                              "mtime": m.get("mtime", 0), "role": role})
+            if len(items) >= 8:
+                break
+        self._clear_strip()
+        if not items:
+            ttk.Label(self.preview_strip,
+                      text="이 그룹에는 미리볼 이미지가 없습니다(문서/영상/압축).",
+                      style="Hint.TLabel").pack(anchor="w")
+            return
+        ttk.Label(self.preview_strip, text="불러오는 중…",
+                  style="Hint.TLabel").pack(anchor="w")
+        self._preview_seq += 1
+        seq = self._preview_seq
+        threading.Thread(target=self._thumb_worker, args=(seq, items), daemon=True).start()
+
+    def _thumb_worker(self, seq, items, px=150):
+        for it in items:
+            if seq != self._preview_seq:
+                return
+            img = self._load_thumb(it["path"], it["mtime"], px)
+            self.preview_q.put((seq, it, img))
+        self.preview_q.put((seq, None, None))  # 끝 신호
+
+    def _load_thumb(self, path, mtime, px):
+        cached = self._thumb_cache.get(path)
+        if cached and abs(cached[0] - float(mtime or 0)) < 1e-6:
+            return cached[1]
+        try:
+            ext = os.path.splitext(path)[1].lower()
+            if ext in fingerprint.RAW_EXTS:
+                import rawpy
+                with rawpy.imread(path) as raw:
+                    thumb = raw.extract_thumb()
+                import io
+                im = Image.open(io.BytesIO(thumb.data)) if getattr(thumb, "format", None) \
+                    else Image.fromarray(thumb.data)
+            else:
+                im = Image.open(path)
+            im = im.convert("RGB")
+            orig = im.size
+            im.thumbnail((px, px))
+            im._orig_size = orig  # 캡션용
+            self._thumb_cache[path] = (float(mtime or 0), im)
+            if len(self._thumb_cache) > 200:
+                self._thumb_cache.pop(next(iter(self._thumb_cache)))
+            return im
+        except Exception:
+            return None
+
+    def _drain_preview(self):
+        while not self.preview_q.empty():
+            seq, it, img = self.preview_q.get_nowait()
+            if seq != self._preview_seq:
+                continue
+            if it is None:
+                continue
+            self._add_thumb_cell(it, img)
+
+    def _add_thumb_cell(self, it, img):
+        # 첫 셀이 들어오면 "불러오는 중" 라벨 제거
+        kids = self.preview_strip.winfo_children()
+        if kids and isinstance(kids[0], ttk.Label) and not getattr(kids[0], "_cell", False):
+            kids[0].destroy()
+        cell = ttk.Frame(self.preview_strip)
+        cell._cell = True
+        cell.pack(side="left", padx=4)
+        if img is not None:
+            photo = ImageTk.PhotoImage(img)
+            self._thumb_imgs.append(photo)
+            lbl = tk.Label(cell, image=photo, bg="#0f172a", bd=1, relief="solid")
+            res = "×".join(map(str, getattr(img, "_orig_size", ("", ""))))
+        else:
+            lbl = tk.Label(cell, text="미리보기\n불가", width=18, height=8,
+                           bg="#1f2937", fg="#9ca3af")
+            res = ""
+        lbl.pack()
+        cap = f"{it['role']} · {fmt_size(it['size'])}" + (f" · {res}" if res else "")
+        tk.Label(cell, text=cap, font=(FONT, 8), fg="#475569").pack()
+        name = os.path.basename(it["path"])
+        tk.Label(cell, text=(name[:20] + "…") if len(name) > 21 else name,
+                 font=(FONT, 8), fg="#94a3b8").pack()
+
     def on_tree_click(self, event):
         tv = event.widget
         region = tv.identify_region(event.x, event.y)
@@ -1148,6 +1367,8 @@ class App(tk.Tk):
         if not meta:
             return
         col = tv.identify_column(event.x)  # '#0' = 체크(선택) 칸
+        # 어떤 줄을 누르든 미리보기 갱신(이미지 그룹이면 나란히 표시)
+        self._show_preview(tv, iid)
         if meta["type"] == "group":
             # 그룹의 펼침 삼각형 클릭은 기본 동작(열기/닫기)에 맡김
             if "indicator" in tv.identify_element(event.x, event.y):

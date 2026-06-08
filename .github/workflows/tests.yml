@@ -1,0 +1,35 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    # 이 도구는 Windows 전용(long path, st_ino 하드링크 등) → Windows 러너에서 검증
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies (lightweight set)
+        # 대형 선택 패키지(rapidocr-onnxruntime / PyMuPDF / rawpy / imageio-ffmpeg)는
+        # 제외 — 해당 테스트는 라이브러리가 없으면 자동 skip 되므로 그린 유지.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest Pillow numpy pypdf olefile py7zr pillow-heif
+
+      - name: Run tests
+        run: python -m pytest -q

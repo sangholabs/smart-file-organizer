@@ -80,7 +80,11 @@ py main.py apply             :: decisions.json 미리보기(드라이런, 실제
 py main.py apply --apply     :: 실제로 격리폴더(또는 휴지통)로 이동
 py main.py undo 2026-05-31_140530   :: 해당 작업을 원위치로 복원
 py main.py doctor            :: 환경 점검(어떤 선택 기능이 동작하는지·빠진 라이브러리 설치법)
+py main.py export --format csv :: 분석 결과를 CSV(Excel) 로 내보내기 (--format json 도 가능)
 ```
+
+> 💡 **GUI 부가 기능:** 결과 줄을 클릭하면 그 그룹의 **사진을 나란히 미리보기**(하단 패널, 끄기 가능)할 수 있고,
+> 스캔 중에는 **진행률 %·예상 남은시간**이 표시됩니다. 하단 **"⬇ 결과 내보내기"** 로 CSV/JSON 저장도 됩니다.
 
 ### 전형적인 흐름
 1. `py main.py scan` — 설정된 폴더를 검사하고 중복 후보의 해시를 계산합니다.

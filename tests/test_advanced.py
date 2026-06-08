@@ -402,6 +402,42 @@ class TestImageClustering(unittest.TestCase):
         self.assertEqual(sizes, [1, 2])
 
 
+class TestExport(Base):
+    def test_csv_and_json(self):
+        import csv as _csv
+        import json as _json
+        from organizer import exporter
+        data = b"DUPLICATE-CONTENT" * 4000
+        (self.src / "a.bin").write_bytes(data)
+        (self.src / "a_copy.bin").write_bytes(data)   # 완전중복 그룹
+        (self.src / ".DS_Store").write_bytes(b"junk")  # 찌꺼기(flat)
+        result = self.run_all(self.cfg(junk_globs=[".DS_Store"]))
+
+        rows = list(exporter.iter_rows(result))
+        self.assertTrue(rows, "내보낼 행이 있어야 함")
+        # 완전중복 keeper/move 역할이 표기되는지
+        roles = {r["role"] for r in rows}
+        self.assertTrue({"keeper", "move"} & roles)
+
+        csv_path = exporter.export(result, self.tmp / "out.csv")
+        self.assertTrue(csv_path.exists())
+        with open(csv_path, encoding="utf-8-sig", newline="") as fp:
+            reader = list(_csv.DictReader(fp))
+        self.assertEqual(len(reader), len(rows))
+        self.assertEqual(set(exporter.CSV_HEADER), set(reader[0].keys()))
+
+        json_path = exporter.export(result, self.tmp / "out.json", fmt="json")
+        obj = _json.loads(json_path.read_text(encoding="utf-8"))
+        self.assertIn("categories", obj)
+        keys = {c["key"] for c in obj["categories"]}
+        self.assertIn("dup", keys)
+
+    def test_bad_format(self):
+        from organizer import exporter
+        with self.assertRaises(ValueError):
+            exporter.export({}, self.tmp / "x.txt", fmt="txt")
+
+
 class TestDoctor(unittest.TestCase):
     def test_check_shape(self):
         from organizer import doctor
